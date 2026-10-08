@@ -100,7 +100,10 @@ TITLE_LIMIT = 80
 def tidy_title(title):
     """Чистит заголовок: формат и оплата из шапки, повторы слов, эмодзи, опечатки вида «Контентменеджер», длина."""
     t = re.sub(r"\(\s*удал[её]нк\w*\s*\)", "", title, flags=re.I)
+    # «ИП Иванова Анна Сергеевна», «ИП Петров А. В.» — убираем вместе с ФИО
+    t = re.sub(r"(?:\s+(?:в|у|от)\s+|\s*[—–-]\s*)?\bИП\s+[«\"]?[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ](?:[а-яё]+|\.)){0,2}[»\"]?", "", t)
     t = re.sub(r"^\s*(?:требуется|требуются)\s+", "", t, flags=re.I)
+    t = re.sub(r"^\s*(?:ну,?\s*)?(?:а\s+)?(?:ещ[её]\s+)?(?:сегодня|сейчас|кроме того,?)\s+", "", t, flags=re.I)
     # «Копирайтер, сценарии | онлайн-школа | удалёнка | 30 тыс.» → убираем куски про формат и деньги
     parts = [p.strip() for p in re.split(r"\s*\|\s*", t)]
     parts = [parts[0]] + [p for p in parts[1:] if p and not _TITLE_NOISE.search(p)]
@@ -141,42 +144,78 @@ def employer_of(item):
     for line in item.text.split("\n"):
         m = _FIELD.match(line)
         if m:
+            # частное лицо («ИП Иванова А. С.», «Ильиных Э. С.») в сообщение не выводим
+            if re.fullmatch(r"(?:ИП\s+)?[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ](?:[а-яё]+|\.))+\.?", m.group(2).strip()):
+                return ""
             value = strip_contacts(re.split(r"(?<=[.!?])\s", m.group(2).strip())[0]).rstrip(".")
             return value[:70].rsplit(" ", 1)[0] + "…" if len(value) > 70 else value
     return ""
 
 
-def summary_of(item, limit=220):
-    """Суть в 1–2 строки: первые пункты задач, иначе первые фразы описания."""
+_REQ_HEADER = re.compile(
+    r"^\W*(требования|кого (?:мы )?ищ|что (?:мы )?ждем|что (?:мы )?ждём|ждем от|ждём от|ожидания|нам важно|вы нам подходите"
+    r"|что нужно от вас|что важно)\b", re.I)
+SUMMARY_LIMIT = 280
+
+
+def _section_points(lines, start, header_re, limit):
+    """Пункты списка после строки-заголовка (до пустой строки или следующего заголовка)."""
+    line = lines[start]
+    after = line.split(":", 1)[1].strip() if ":" in line else ""
+    points = [after] if after else []
+    for nxt in lines[start + 1:]:
+        if not nxt:
+            if points:
+                break
+            continue
+        if header_re.match(nxt) or _TASKS_HEADER.match(nxt) or _REQ_HEADER.match(nxt) or (nxt.endswith(":") and len(nxt) < 40):
+            break
+        if _CONTACT_LINE.match(nxt):
+            break
+        points.append(_BULLET.sub("", nxt).strip().rstrip(";,."))
+        if len(points) >= limit:
+            break
+    return [strip_contacts(p) for p in points if p]
+
+
+def summary_of(item, limit=SUMMARY_LIMIT):
+    """Суть в 2–3 строки: задачи и главное требование, иначе первые фразы описания. Перечисления через запятую."""
     lines = [l.strip() for l in item.text.split("\n")]
+    tasks, req = [], []
     for i, line in enumerate(lines):
-        if _TASKS_HEADER.match(line):
-            after = line.split(":", 1)[1].strip() if ":" in line else ""
-            points = [after] if after else []
-            for nxt in lines[i + 1:]:
-                if not nxt:
-                    if points:
-                        break
-                    continue
-                if _TASKS_HEADER.match(nxt) or (nxt.endswith(":") and len(nxt) < 40):
-                    break
-                points.append(_BULLET.sub("", nxt).rstrip(";,."))
-                if len(points) >= 3:
-                    break
-            text = strip_contacts("; ".join(p for p in points if p))
-            if text:
-                return _shorten(text, limit)
+        if not tasks and _TASKS_HEADER.match(line):
+            tasks = _section_points(lines, i, _TASKS_HEADER, 3)
+        elif not req and _REQ_HEADER.match(line):
+            req = _section_points(lines, i, _REQ_HEADER, 1)
+    if tasks:
+        text = _sentence(", ".join(_lower_first(p) for p in tasks))
+        if req:
+            text += " " + _sentence(req[0])
+        return _shorten(text, limit)
     body = []
     for line in lines[1:]:
         if not line or _SKIP_LINE.match(line) or _CONTACT_LINE.match(line) or _META_LINE.match(line):
             continue
         if line.startswith("#") and " " not in line.strip("#"):
             continue
+        line = re.sub(r"^\W*(требования|задачи|обязанности|условия)\s*:\s*", "", line, flags=re.I)
         body.append(_BULLET.sub("", line))
         if sum(len(b) for b in body) > limit:
             break
-    text = strip_contacts(" ".join(body).replace("#", ""))
+    text = strip_contacts(" ".join(body).replace("#", "")).replace("[", "").replace("]", "")
+    # приветствия авторов («Доброе утро, дорогие.») в суть не берём
+    text = re.sub(r"(?:^|(?<=[.!?]\s))(?:доброе|добрый|привет|всем привет|друзья|коллеги)[^.!?]*[.!?]\s*", "", text, flags=re.I)
     return _shorten(text, limit)
+
+
+def _lower_first(s):
+    return s[:1].lower() + s[1:] if s[1:2].islower() else s
+
+
+def _sentence(s):
+    s = s.strip().rstrip(";,:")
+    s = s[:1].upper() + s[1:]
+    return s if s.endswith((".", "!", "?", "…")) else s + "."
 
 
 def _uncaps(text):
@@ -188,18 +227,26 @@ def _uncaps(text):
             first = next(i for i, c in enumerate(s) if c.isalpha())
             return s[: first + 1] + s[first + 1:].lower()
         return s
-    return re.sub(r"[^.!?]+[.!?]?", fix, text)
+    text = re.sub(r"[^.!?]+[.!?]?", fix, text)
+    # отдельные слова капсом («СРАЗУ») тоже; аббревиатуры из 2–3 букв (SEO, СМИ, ВК) не трогаем
+    return re.sub(r"\b[А-ЯЁ]{4,}\b", lambda m: m.group(0) if m.group(0) in _KEEP_CAPS else m.group(0).lower(), text)
+
+
+_KEEP_CAPS = {"МАКС", "НИУ", "ВШЭ", "МГУ", "СПБГУ", "РАНХИГС"}
 
 
 def _shorten(text, limit):
+    """Сокращает до limit знаков: по концу предложения, а если не выходит, по слову с «…». «;» → «,»."""
+    text = re.sub(r"\s*;\s*", ", ", text)
     text = _uncaps(re.sub(r"\s+", " ", text).strip())
+    text = re.sub(r",\s*,", ",", text).strip(" ,")
     if len(text) <= limit:
         return text
     cut = text[:limit]
-    end = max(cut.rfind(". "), cut.rfind("; "))
-    if end > limit * 0.5:
-        return cut[: end + 1].rstrip(";")
-    return cut.rsplit(" ", 1)[0].rstrip(",;:") + "…"
+    end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "), cut.rfind("…"))
+    if end > limit * 0.4:
+        return cut[: end + 1]
+    return cut.rsplit(" ", 1)[0].rstrip(",;:—–-") + "…"
 
 
 # --- оплата ---------------------------------------------------------------
@@ -209,10 +256,11 @@ _MONEY = re.compile(
     r"(?:₽|руб|р\.|рубл|тыс|т\.\s?р|k\b|к\b|\$|€|usd|usdt|долл|евро)", re.I)
 _HASHTAG_PAY = re.compile(r"#(?:от(\d+))?(?:до(\d+))?к\b", re.I)
 _PAY_LABEL = re.compile(r"^\W*(з/п|зп|зарплата|оплата|доход|ставка|гонорар|вознаграждение)\s*[:—–-]?\s*", re.I)
+_PAY_DROP = re.compile(r"удал[её]н|remote|офис|гибрид|занятост|график|формат|полный день", re.I)
 
 
 def pay_of(item):
-    """Строка с оплатой, если в тексте есть сумма с валютой, иначе пустая строка."""
+    """Оплата, если в тексте есть сумма с валютой, иначе пустая строка. Слова про формат работы из неё убраны."""
     for line in item.text.split("\n"):
         m = _MONEY.search(line)
         if m and re.search(r"\d", m.group(0)):
@@ -222,7 +270,9 @@ def pay_of(item):
                 # длинная строка описания: берём сумму и несколько слов после неё («в месяц», «за видео»)
                 after = re.split(r"[.;!?\n]", line[m.end(): m.end() + 30])[0]
                 value = (m.group(0) + after).strip(" ,")
-            return _shorten(value, 90)
+            parts = [p.strip() for p in value.split(",")]
+            value = ", ".join(p for p in parts if p and not (_PAY_DROP.search(p) and not re.search(r"\d", p)))
+            return _shorten(value, 90).rstrip(".")
     m = _HASHTAG_PAY.search(item.text)
     if m and (m.group(1) or m.group(2)):
         lo, hi = m.group(1), m.group(2)
@@ -230,3 +280,121 @@ def pay_of(item):
             return f"{lo}–{hi} тыс. ₽"
         return f"от {lo} тыс. ₽" if lo else f"до {hi} тыс. ₽"
     return ""
+
+
+# --- контакты для отклика ---------------------------------------------------
+
+_LINK = re.compile(r"(?:https?://|(?<![\w/.])t\.me/|(?<![\w/.])forms\.gle/)[^\s<>«»\"')]+", re.I)
+_EMAIL_FULL = re.compile(r"[\w.+-]+@[\w-]+\.[a-z]{2,}", re.I)
+_NICK = re.compile(r"(?<![\w.@])@([A-Za-z][\w]{3,})")
+
+
+def _link_key(url):
+    u = url.lower().rstrip(".,;:!?)")
+    u = re.sub(r"^https?://", "", u)
+    u = re.sub(r"^www\.", "", u)
+    if "hh.ru/vacancy/" in u:
+        u = u.split("?", 1)[0]
+    return u
+
+
+def contacts_of(item):
+    """Способы отклика из текста: [(ключ, вид, как показать)], вид: nick | email | phone | link | instagram.
+
+    Ключ одинаковый для одного контакта в разных постах (по нему склеиваются дубли).
+    """
+    text, own = item.text, item.channel.lower()
+    found, seen = [], set()
+
+    def add(key, kind, shown):
+        if key not in seen:
+            seen.add(key)
+            found.append((key, kind, shown))
+
+    for m in _NICK.finditer(text):
+        nick = m.group(1)
+        if nick.lower() != own:
+            add("@" + nick.lower(), "nick", "@" + nick)
+    for m in _EMAIL_FULL.finditer(text):
+        add(m.group(0).lower(), "email", m.group(0))
+    for m in re.finditer(r"(?<!\d)(?:\+7|8)[\s(-]*\d{3}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}(?!\d)", text):
+        add(re.sub(r"\D", "", m.group(0))[-10:], "phone", m.group(0).strip())
+    for m in _LINK.finditer(text):
+        url = m.group(0).rstrip(".,;:!?)")
+        key = _link_key(url)
+        if key.startswith((f"t.me/{own}/", f"t.me/s/{own}")) or key == f"t.me/{own}":
+            continue
+        if not url.lower().startswith("http"):
+            url = "https://" + url
+        kind = "instagram" if "instagram.com" in key else "link"
+        add(key, kind, url)
+    return found
+
+
+def contact_button(item):
+    """Есть ли под постом кнопка для получения контакта или отклика (Текстодром, SEO HR)."""
+    return any(re.search(r"контакт|отклик", norm(text)) for text, _ in item.extra.get("buttons", []))
+
+
+def digest_number(item):
+    """Номер пункта в подборке, как он написан в посте («16. #Копирайтер» → 16)."""
+    m = re.match(r"\s*(\d{1,2})\.", item.text)
+    return int(m.group(1)) if m else item.part
+
+
+# --- опыт и формат ------------------------------------------------------------
+
+_NUM_WORDS = {"одного": 1, "года": 1, "двух": 2, "трех": 3, "трёх": 3, "четырех": 4, "пяти": 5, "шести": 6}
+_YEARS = re.compile(
+    r"(\d+(?:[.,]\d+)?|одного|двух|трех|четырех|пяти|шести)\s*(?:-?х)?\s*\+?\s*(?:[-–]\s*\d+\s*(?:-?х)?\s*)?(?:лет|года|год)\b"
+    r"|от\s+(года)\b")
+
+
+MIN_SENIOR_YEARS = 3
+
+
+def experience_years(item):
+    """Сколько лет опыта требуют (наибольшее из найденных требований) или None, если не сказано."""
+    t = norm(item.text)
+    found = []
+    for m in re.finditer(r"опыт", t):
+        window = re.split(r"[.;\n]", t[m.start(): m.start() + 90])[0]
+        y = _YEARS.search(window)
+        if y:
+            found.append(y)
+    for m in re.finditer(r"от\s+[^.;\n]{0,15}?(?:лет|года)\s+(?:опыта|работы|в профессии)", t):
+        y = _YEARS.search(m.group(0))
+        if y:
+            found.append(y)
+    years = []
+    for y in found:
+        raw = y.group(1) or y.group(2)
+        years.append(_NUM_WORDS.get(raw) or float(raw.replace(",", ".")))
+    if re.search(r"\bsenior\b|сеньор|синьор", t):
+        years.append(MIN_SENIOR_YEARS)  # «уровня senior» без цифры = опыт от трёх лет
+    return max(years) if years else None
+
+
+def no_experience(item):
+    t = norm(item.text)
+    if re.search(r"без опыта|опыт не (?:нужен|требуется|обязател)|для начинающих", t):
+        return True
+    # «новичков не рассматриваем», «не для новичков» — это наоборот
+    for m in re.finditer(r"новичк\w*", t):
+        around = t[max(0, m.start() - 15): m.end() + 20]
+        if not re.search(r"\bне\b|нельзя|без новичк", around):
+            return True
+    return False
+
+
+def work_format(item, remote_words):
+    """Метки формата работы, которые нашлись в посте: удалёнка, частичная, проект."""
+    t = norm(item.context + "\n" + item.text)
+    labels = []
+    if any(w in t for w in remote_words):
+        labels.append("удалёнка")
+    if re.search(r"частичн|неполн|part.?time|подработ", t):
+        labels.append("частичная")
+    if re.search(r"проектн|разов|сдельн|за проект|за ролик|за статью|за сценарий|за видео|за материал", t):
+        labels.append("проект")
+    return labels

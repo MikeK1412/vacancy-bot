@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 
 import config
-from textutils import find_any, latin_share, load_keywords, norm, title_of
+from textutils import contacts_of, experience_years, find_any, latin_share, load_keywords, norm, title_of
 
 
 @dataclass
@@ -58,6 +58,12 @@ def check_keywords(item):
     junk = find_any(text, kw.get("мусор", []))
     if junk:
         return Verdict(False, f"мусор: {junk}")
+    ad = find_any(text, kw.get("реклама каналов", []))
+    if ad:
+        return Verdict(False, f"реклама канала: {ad}")
+    banned = find_any(text, kw.get("запрещённая соцсеть", []))
+    if banned:
+        return Verdict(False, f"инстаграм: {banned}")
     foreign = required_language(text, kw)
     if foreign:
         return Verdict(False, f"иностранный язык: {foreign}")
@@ -83,8 +89,15 @@ def check_keywords(item):
             return Verdict(False, f"офис: {office}")
         if item.channel not in config.TEXT_CHANNELS:
             return Verdict(False, "удалёнка не указана")
-        return Verdict(True, f"тема «{topic}», формат не указан (текстовый канал)")
-    return Verdict(True, f"тема «{topic}», удалёнка «{remote}»")
+    years = experience_years(item)
+    if years is not None and years >= config.MAX_EXPERIENCE_YEARS:
+        return Verdict(False, f"опыт от {years:g} лет")
+    contacts = contacts_of(item)
+    if contacts and all(kind == "instagram" for _, kind, _ in contacts):
+        return Verdict(False, "инстаграм: отклик только там")
+    if not contacts and item.channel not in config.BUTTON_CONTACT_CHANNELS:
+        return Verdict(False, "нет контакта для отклика")
+    return Verdict(True, f"тема «{topic}», " + (f"удалёнка «{remote}»" if remote else "формат не указан (текстовый канал)"))
 
 
 def check(item):

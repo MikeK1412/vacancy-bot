@@ -12,6 +12,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from html import unescape
 from html.parser import HTMLParser
 
 import requests
@@ -40,29 +41,38 @@ class Post:
 
 
 class _PageParser(HTMLParser):
-    def __init__(self):
+    """Разбирает страницу t.me/s/: текст постов, ссылки внутри текста и кнопки под постом."""
+
+    def __init__(self, channel):
         super().__init__()
+        self.channel = channel.lower()
         self.posts = []
         self.cur = None
         self.depth = 0
         self.in_text = False
+        self.anchor = None      # [href, текст ссылки] внутри текста поста
+        self.button = None      # [href, текст кнопки] под постом
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
         cls = a.get("class", "") or ""
         if tag == "div" and "tgme_widget_message " in cls + " " and a.get("data-post"):
-            self.cur = {"id": int(a["data-post"].split("/")[-1]), "date": None, "text": "",
+            self.cur = {"id": int(a["data-post"].split("/")[-1]), "date": None, "text": "", "buttons": [],
                         "service": "service_message" in cls}  # «канал закрепил сообщение» и т.п.
             self.posts.append(self.cur)
         if self.cur is None:
             return
         if tag == "time" and a.get("datetime") and self.cur["date"] is None:
             self.cur["date"] = a["datetime"]
+        if tag == "a" and "tgme_widget_message_inline_button" in cls and a.get("href"):
+            self.button = [unescape(a["href"]), ""]
         if self.in_text:
             if tag == "div":
                 self.depth += 1
             if tag == "br":
                 self.cur["text"] += "\n"
+            if tag == "a" and a.get("href"):
+                self.anchor = [unescape(a["href"]), ""]
         elif tag == "div" and "tgme_widget_message_text" in cls:
             self.in_text = True
             self.depth = 1
@@ -74,14 +84,29 @@ class _PageParser(HTMLParser):
             self.cur["text"] += "\n"
 
     def handle_endtag(self, tag):
+        if tag == "a" and self.button is not None:
+            self.cur["buttons"].append((self.button[1].strip(), self.button[0]))
+            self.button = None
+        if tag == "a" and self.anchor is not None:
+            href, label = self.anchor
+            self.anchor = None
+            # «Откликнуться: ссылка» → дописываем адрес, чтобы не потерять способ отклика.
+            # Хэштеги (?q=), @ники (они уже в тексте) и ссылки на сам канал пропускаем.
+            own = href.lower().startswith((f"https://t.me/{self.channel}/", f"https://t.me/{self.channel}?"))
+            if not (href.startswith("?") or label.startswith("@") or "http" in label or own):
+                self.cur["text"] += f" {href}"
         if self.in_text and tag == "div":
             self.depth -= 1
             if self.depth == 0:
                 self.in_text = False
 
     def handle_data(self, data):
+        if self.button is not None:
+            self.button[1] += data
         if self.in_text and self.cur is not None:
             self.cur["text"] += data
+            if self.anchor is not None:
+                self.anchor[1] += data
 
 
 def _get(session, url, tries=3):
@@ -102,7 +127,7 @@ def fetch_channel(channel, since, session=None):
     found = {}
     url = f"https://t.me/s/{channel}"
     for _ in range(MAX_PAGES):
-        parser = _PageParser()
+        parser = _PageParser(channel)
         parser.feed(_get(session, url))
         if not parser.posts:
             break
@@ -120,7 +145,7 @@ def fetch_channel(channel, since, session=None):
         date = datetime.fromisoformat(p["date"])
         text = re.sub(r"\n{3,}", "\n\n", p["text"].strip())
         if date >= since and text:
-            posts.append(Post(channel, p["id"], date, text))
+            posts.append(Post(channel, p["id"], date, text, extra={"buttons": p["buttons"]}))
     return posts
 
 
@@ -157,7 +182,8 @@ def split_digest(post):
         header, chunks = parts[0], parts[1:]
     items = []
     for n, chunk in enumerate(c for c in chunks if c):
-        items.append(Post(post.channel, post.post_id, post.date, chunk, context=header, part=n + 1))
+        items.append(Post(post.channel, post.post_id, post.date, chunk, context=header, part=n + 1,
+                          extra={"buttons": post.extra.get("buttons", [])}))
     return items or [post]
 
 

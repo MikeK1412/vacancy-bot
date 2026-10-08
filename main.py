@@ -84,7 +84,12 @@ def main():
     unique, dupes = remove_duplicates(passed, config.DUPLICATE_THRESHOLD,
                                       better=lambda i: (has_pay(i), i.date))
     store = SentStore(config.SENT_FILE, config.SENT_KEEP_DAYS)
-    fresh = [i for i in unique if not store.was_sent(i, config.DUPLICATE_THRESHOLD)]
+    # Вакансия считается отправленной, если отправлялась любая её копия из других каналов.
+    copies = {i.key: [i] for i in unique}
+    for d, k, _ in dupes:
+        copies[k.key].append(d)
+    fresh = [i for i in unique
+             if not any(store.was_sent(c, config.DUPLICATE_THRESHOLD) for c in copies[i.key])]
     print(f"Дублей между постами убрано: {len(dupes)}; уже отправлялись раньше: {len(unique) - len(fresh)}; "
           f"кандидатов: {len(fresh)}")
 
@@ -98,16 +103,17 @@ def main():
         print("\n--- Отсеяны не по теме: мусор, офис, нет удалёнки ---")
         for i in items:
             if not i.extra["reason"].startswith(("не тема", "тема")):
-                print(f"  {i.url}{'#' + str(i.part) if i.part else ''} | {title_of(i)[:60]} | {i.extra['reason']}")
+                print(f"  {i.key} | {tidy_title(title_of(i))} | {i.extra['reason']}")
         print("\n--- Дубли (выброшено → оставлено) ---")
-        for d, k in dupes:
-            print(f"  {d.url} → {k.url} | {title_of(d)[:60]}")
+        for d, k, why in dupes:
+            print(f"  {d.key} → {k.key} ({why}) | {tidy_title(title_of(d))}")
 
     if not chosen:
         print("\nПодходящих новых вакансий нет, сообщение не отправляется.")
         return
 
-    message = build_message(chosen)
+    today = datetime.now(MSK).date()
+    message = build_message(chosen, today, selector.keywords().get("удалёнка", []))
     if args.dry_run:
         print(f"\n=== Сообщение ({len(chosen)} вак., {len(message)} знаков) ===\n")
         print(message)
