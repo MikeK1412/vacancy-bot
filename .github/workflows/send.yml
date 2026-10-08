@@ -1,0 +1,45 @@
+name: Вакансии в чат
+
+on:
+  schedule:
+    - cron: "0 7 * * *"   # каждый день в 07:00 UTC = 10:00 по Москве (GitHub может запустить с опозданием на 5–30 минут)
+  workflow_dispatch:       # кнопка «Run workflow» для ручного запуска
+
+permissions:
+  contents: write          # чтобы закоммитить обновлённый sent.json
+
+concurrency:
+  group: vacancy-bot       # два запуска одновременно не идут, иначе вакансии могут уйти дважды
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Собрать и отправить вакансии
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python main.py
+
+      - name: Сохранить sent.json в репозиторий
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sent.json
+          if git diff --cached --quiet; then
+            echo "sent.json не изменился"
+          else
+            git commit -m "sent.json: отправлено $(date -u +%F)"
+            git push
+          fi
