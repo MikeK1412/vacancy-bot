@@ -245,8 +245,11 @@ def _shorten(text, limit):
     cut = text[:limit]
     end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "), cut.rfind("…"))
     if end > limit * 0.4:
-        return cut[: end + 1]
-    return cut.rsplit(" ", 1)[0].rstrip(",;:—–-") + "…"
+        cut = cut[: end + 1]
+    else:
+        cut = cut.rsplit(" ", 1)[0]
+    # текст обрезан: всегда заканчиваем многоточием
+    return cut.rstrip(" .,;:—–-") + "…"
 
 
 # --- оплата ---------------------------------------------------------------
@@ -259,26 +262,98 @@ _PAY_LABEL = re.compile(r"^\W*(з/п|зп|зарплата|оплата|дохо
 _PAY_DROP = re.compile(r"удал[её]н|remote|офис|гибрид|занятост|график|формат|полный день", re.I)
 
 
+NBSP = " "
+_PERIODS = [
+    (r"в\s+месяц|/\s*мес|за\s+месяц|ежемесячно|в\s+мес\b|оклад", "/мес"),
+    (r"в\s+час|/\s*час|за\s+час", "/час"),
+    (r"в\s+день|за\s+день", "/день"),
+    (r"за\s+смену", "за смену"),
+    (r"за\s+1\s*000\s+знаков|за\s+1000\s+знаков|за\s+тысячу\s+знаков", "за 1000 знаков"),
+    (r"за\s+(статью|задачу|проект|ролик|видео|сценарий|материал|пост|текст|выпуск|серию|рецензию)", None),
+]
+
+
+def _thousands(n):
+    return f"{n:,}".replace(",", NBSP)
+
+
+def _amounts(chunk):
+    """Числа из суммы с учётом «тыс», «к», «т.р.»: «50-60 тыс.» → [50000, 60000]."""
+    mult = 1000 if re.search(r"тыс|т\.\s?р|\d\s*[кk]\b", chunk, re.I) else 1
+    nums = []
+    for raw in re.findall(r"\d[\d\s ]*(?:[.,]\d+)?", chunk):
+        raw = re.sub(r"[\s ]", "", raw).replace(",", ".")
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if mult > 1 and value < 1000:
+            value *= mult
+        nums.append(int(round(value)))
+    return nums
+
+
+def format_pay(chunk, tail=""):
+    """Единый вид оплаты: «от 50 000 ₽/мес», «50 000–60 000 ₽/мес», «до 100 000 ₽/мес», «2 000 ₽ за задачу».
+
+    chunk — найденная сумма, tail — несколько слов после неё (там бывает «в месяц», «за статью»).
+    Если разобрать не получилось, возвращает пустую строку.
+    """
+    nums = _amounts(chunk)
+    if not nums:
+        return ""
+    low = norm(chunk + " " + tail)
+    if re.search(r"\$|usd(?!t)|долл", low):
+        cur = "$"
+    elif re.search(r"€|евро|eur", low):
+        cur = "€"
+    elif "usdt" in low:
+        cur = "USDT"
+    else:
+        cur = "₽"
+    period = ""
+    for pattern, label in _PERIODS:
+        m = re.search(pattern, low)
+        if m:
+            period = label if label else " " + m.group(0)
+            break
+    if period and not period.startswith("/"):
+        period = " " + period.strip()
+    if len(nums) >= 2 and nums[1] > nums[0]:
+        amount = f"{_thousands(nums[0])}–{_thousands(nums[1])}"
+    elif re.match(r"\s*до\b", low):
+        amount = f"до {_thousands(nums[0])}"
+    elif re.match(r"\s*от\b", low) or re.search(r"\bот\s*$", tail):
+        amount = f"от {_thousands(nums[0])}"
+    else:
+        amount = _thousands(nums[0])
+    return f"{amount}{NBSP}{cur}{period}"
+
+
 def pay_of(item):
-    """Оплата, если в тексте есть сумма с валютой, иначе пустая строка. Слова про формат работы из неё убраны."""
+    """Оплата в едином виде («от 50 000 ₽/мес»), если в тексте есть сумма с валютой, иначе пустая строка."""
     for line in item.text.split("\n"):
         m = _MONEY.search(line)
         if m and re.search(r"\d", m.group(0)):
-            value = _PAY_LABEL.sub("", line.strip())
-            value = strip_contacts(_BULLET.sub("", value)).replace("#", "")
-            if len(value) > 90:
-                # длинная строка описания: берём сумму и несколько слов после неё («в месяц», «за видео»)
-                after = re.split(r"[.;!?\n]", line[m.end(): m.end() + 30])[0]
-                value = (m.group(0) + after).strip(" ,")
-            parts = [p.strip() for p in value.split(",")]
-            value = ", ".join(p for p in parts if p and not (_PAY_DROP.search(p) and not re.search(r"\d", p)))
+            # «от 100 000 до 120 000 ₽»: сумма-регулярка ловит только «до 120 000 ₽», добираем начало диапазона
+            before = line[max(0, m.start() - 30): m.start()]
+            start = re.search(r"(от\s*\d[\d\s .,]*(?:тыс\.?|к)?\s*)$", before, re.I)
+            if start and not m.group(0).lower().startswith("от"):
+                chunk = start.group(1) + m.group(0)
+            else:
+                chunk = ("от " if re.search(r"\bот\s*$", before, re.I) else "") + m.group(0)
+            tail = re.split(r"[.;!?\n]", line[m.end(): m.end() + 40].lstrip(". "))[0]  # «тыс. в месяц»
+            formatted = format_pay(chunk, tail)
+            if formatted:
+                return formatted
+            value = strip_contacts(_BULLET.sub("", _PAY_LABEL.sub("", line.strip()))).replace("#", "")
             return _shorten(value, 90).rstrip(".")
     m = _HASHTAG_PAY.search(item.text)
     if m and (m.group(1) or m.group(2)):
         lo, hi = m.group(1), m.group(2)
         if lo and hi:
-            return f"{lo}–{hi} тыс. ₽"
-        return f"от {lo} тыс. ₽" if lo else f"до {hi} тыс. ₽"
+            return f"{_thousands(int(lo) * 1000)}–{_thousands(int(hi) * 1000)}{NBSP}₽/мес"
+        return f"от {_thousands(int(lo) * 1000)}{NBSP}₽/мес" if lo else f"до {_thousands(int(hi) * 1000)}{NBSP}₽/мес"
     return ""
 
 
@@ -318,7 +393,8 @@ def contacts_of(item):
     for m in _EMAIL_FULL.finditer(text):
         add(m.group(0).lower(), "email", m.group(0))
     for m in re.finditer(r"(?<!\d)(?:\+7|8)[\s(-]*\d{3}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}(?!\d)", text):
-        add(re.sub(r"\D", "", m.group(0))[-10:], "phone", m.group(0).strip())
+        digits = re.sub(r"\D", "", m.group(0))[-10:]
+        add(digits, "phone", f"+7 {digits[:3]} {digits[3:6]}-{digits[6:8]}-{digits[8:]}")  # «+7 965 574-98-97»
     for m in _LINK.finditer(text):
         url = m.group(0).rstrip(".,;:!?)")
         key = _link_key(url)

@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 
 import config
-from textutils import contacts_of, experience_years, find_any, latin_share, load_keywords, norm, title_of
+from textutils import contact_button, contacts_of, experience_years, find_any, latin_share, load_keywords, norm, title_of
 
 
 @dataclass
@@ -49,6 +49,54 @@ def priority(item):
     return 1 if find_any(title, keywords().get("текстовые роли", [])) else 0
 
 
+# --- «Не вакансия»: статьи, советы, подборки ---------------------------------
+# Решаем по совокупности признаков найма, а не по одному слову: настоящая вакансия с фразой «в кризис»
+# или «как мы работаем» в тексте не пострадает, если в ней есть работодатель, задачи, условия и контакт.
+
+_HIRING = re.compile(r"\b(ищем|ищет|ищут|ищу|требуется|требуются|в поисках|приглашаем|нужен|нужна|нужны|открыта вакансия"
+                     r"|работодатель\s*:|компания\s*:|где\s*:)", re.I)
+_DUTIES = re.compile(r"(задачи|обязанности|что (?:нужно|предстоит|будет нужно) делать|чем (?:предстоит|нужно) заниматься"
+                     r"|требования|кого (?:мы )?ищ|ожидани|что (?:мы )?ждем|вам предстоит)\s*:?", re.I)
+_TERMS = re.compile(r"(условия|оплата|зарплата|з/п|\bзп\b|гонорар|ставка|оклад|график|формат работы|занятость"
+                    r"|удален|удалён|₽|руб|тыс\b)", re.I)
+
+
+def hiring_signals(item):
+    """Какие из четырёх признаков найма есть в посте: работодатель, задачи, условия, контакт."""
+    text = item.text
+    return {
+        "работодатель": bool(_HIRING.search(text)),
+        "задачи": bool(_DUTIES.search(text)),
+        "условия": bool(_TERMS.search(norm(text))),
+        "контакт": bool(contacts_of(item)) or contact_button(item),
+    }
+
+
+def is_not_vacancy(item, kw):
+    """Причина, если пост не вакансия (статья, совет, подборка), иначе пустая строка."""
+    s = hiring_signals(item)
+    title = norm(title_of(item))
+    if not s["контакт"] and not s["условия"]:
+        return "нет ни контакта, ни условий"
+    advice = find_any(title, kw.get("не вакансия: заголовок", []))
+    if advice and sum(s.values()) < 3:
+        return f"статья или совет: «{advice}»"
+    if (title.endswith("?") or title.startswith("как ")) and not s["контакт"]:
+        return "заголовок-вопрос без контакта"
+    return ""
+
+
+def editor_only(item, kw):
+    """Заголовок про редактора или корректора, а в тексте нет копирайтинга: это не наша вакансия."""
+    title = norm(title_of(item))
+    if not re.search(r"редактор|корректор", title):
+        return False
+    # «Копирайтер-редактор», «Редактор / копирайтер», «SMM-редактор», «Контент-редактор», «Редактор / журналист» — пишущие роли
+    if re.search(r"копирайт|автор|райтер|writer|сценар|журналист|smm|смм|контент", title):
+        return False
+    return not find_any(norm(item.text), kw.get("копирайтинг в тексте", []))
+
+
 def check_keywords(item):
     kw = keywords()
     text = norm(item.text)
@@ -64,6 +112,9 @@ def check_keywords(item):
     banned = find_any(text, kw.get("запрещённая соцсеть", []))
     if banned:
         return Verdict(False, f"инстаграм: {banned}")
+    not_vacancy = is_not_vacancy(item, kw)
+    if not_vacancy:
+        return Verdict(False, f"не вакансия: {not_vacancy}")
     foreign = required_language(text, kw)
     if foreign:
         return Verdict(False, f"иностранный язык: {foreign}")
@@ -75,6 +126,8 @@ def check_keywords(item):
     topic = find_any(title, kw.get("тема в заголовке", [])) or find_any(text, kw.get("тема в тексте", []))
     if not topic:
         return Verdict(False, "не тема: нет слов про тексты")
+    if editor_only(item, kw):
+        return Verdict(False, "редактор, не копирайтер")
     if is_smm(item):
         shooting = find_any(text, kw.get("smm: съёмки и выезды", []))
         if shooting:
