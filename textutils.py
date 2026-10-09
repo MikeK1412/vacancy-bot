@@ -192,7 +192,7 @@ def summary_of(item, limit=SUMMARY_LIMIT):
         if req:
             text += " " + _sentence(req[0])
         return _shorten(text, limit)
-    body = []
+    body, cut_early = [], False
     for line in lines[1:]:
         if not line or _SKIP_LINE.match(line) or _CONTACT_LINE.match(line) or _META_LINE.match(line):
             continue
@@ -201,11 +201,15 @@ def summary_of(item, limit=SUMMARY_LIMIT):
         line = re.sub(r"^\W*(требования|задачи|обязанности|условия)\s*:\s*", "", line, flags=re.I)
         body.append(_BULLET.sub("", line))
         if sum(len(b) for b in body) > limit:
+            cut_early = True  # дальше в посте ещё есть текст
             break
     text = strip_contacts(" ".join(body).replace("#", "")).replace("[", "").replace("]", "")
     # приветствия авторов («Доброе утро, дорогие.») в суть не берём
     text = re.sub(r"(?:^|(?<=[.!?]\s))(?:доброе|добрый|привет|всем привет|друзья|коллеги)[^.!?]*[.!?]\s*", "", text, flags=re.I)
-    return _shorten(text, limit)
+    text = _shorten(text, limit)
+    if cut_early and not text.endswith("…"):
+        text = text.rstrip(" .,;:—–-") + "…"  # описание обрезано: многоточие, даже если вырезанная ссылка его укоротила
+    return text
 
 
 def _lower_first(s):

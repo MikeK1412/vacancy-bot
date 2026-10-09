@@ -52,6 +52,7 @@ class _PageParser(HTMLParser):
         self.in_text = False
         self.anchor = None      # [href, текст ссылки] внутри текста поста
         self.button = None      # [href, текст кнопки] под постом
+        self.last_href = None   # адрес последней ссылки в тексте (для ссылок, разбитых на куски)
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -90,11 +91,23 @@ class _PageParser(HTMLParser):
         if tag == "a" and self.anchor is not None:
             href, label = self.anchor
             self.anchor = None
-            # «Откликнуться: ссылка» → дописываем адрес, чтобы не потерять способ отклика.
             # Хэштеги (?q=), @ники (они уже в тексте) и ссылки на сам канал пропускаем.
             own = href.lower().startswith((f"https://t.me/{self.channel}/", f"https://t.me/{self.channel}?"))
-            if not (href.startswith("?") or label.startswith("@") or "http" in label or own):
+            if href.startswith("?") or label.startswith("@") or own or not label.strip():
+                pass
+            elif label.strip().lower() in href.lower():
+                # Текст ссылки — кусок самого адреса («Grifonmedia.ru», «ht» + «tps://…»): заменяем его полным адресом.
+                # Соседний кусок той же ссылки («ht» и следом «tps://…») просто убираем, чтобы адрес не склеился.
+                text = self.cur["text"][: len(self.cur["text"]) - len(label)]
+                if self.last_href == href and text.endswith(href):
+                    self.cur["text"] = text
+                else:
+                    self.cur["text"] = text + href
+                self.last_href = href
+            else:
+                # «Откликнуться: ссылка» → дописываем адрес, чтобы не потерять способ отклика.
                 self.cur["text"] += f" {href}"
+                self.last_href = href
         if self.in_text and tag == "div":
             self.depth -= 1
             if self.depth == 0:

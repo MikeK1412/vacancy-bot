@@ -72,6 +72,25 @@ def hiring_signals(item):
     }
 
 
+_INSTAGRAM = re.compile(r"instagram|инстаграм|\bинст[аыуе]?\b|\binsta\b", re.I)
+
+
+def instagram_problem(item, kw):
+    """Правило Instagram: причина, если откликнуться можно только через Instagram или вакансия целиком про него.
+
+    Instagram как площадка для текстов и сноска «запрещённая в РФ соцсеть» не мешают, если есть другой контакт.
+    """
+    contacts = contacts_of(item)
+    other = [c for c in contacts if c[1] != "instagram"] or contact_button(item)
+    direct = find_any(norm(item.text), kw.get("instagram: отклик в директ", []))
+    if not other and (direct or any(c[1] == "instagram" for c in contacts)):
+        return "отклик только через Instagram"
+    title = norm(title_of(item))
+    if _INSTAGRAM.search(title) and not find_any(title, kw.get("instagram: другие площадки", [])):
+        return "вакансия целиком про Instagram"
+    return ""
+
+
 def is_not_vacancy(item, kw):
     """Причина, если пост не вакансия (статья, совет, подборка), иначе пустая строка."""
     s = hiring_signals(item)
@@ -109,9 +128,9 @@ def check_keywords(item):
     ad = find_any(text, kw.get("реклама каналов", []))
     if ad:
         return Verdict(False, f"реклама канала: {ad}")
-    banned = find_any(text, kw.get("запрещённая соцсеть", []))
-    if banned:
-        return Verdict(False, f"инстаграм: {banned}")
+    instagram = instagram_problem(item, kw)
+    if instagram:
+        return Verdict(False, f"инстаграм: {instagram}")
     not_vacancy = is_not_vacancy(item, kw)
     if not_vacancy:
         return Verdict(False, f"не вакансия: {not_vacancy}")
@@ -146,8 +165,6 @@ def check_keywords(item):
     if years is not None and years >= config.MAX_EXPERIENCE_YEARS:
         return Verdict(False, f"опыт от {years:g} лет")
     contacts = contacts_of(item)
-    if contacts and all(kind == "instagram" for _, kind, _ in contacts):
-        return Verdict(False, "инстаграм: отклик только там")
     if not contacts and item.channel not in config.BUTTON_CONTACT_CHANNELS:
         return Verdict(False, "нет контакта для отклика")
     return Verdict(True, f"тема «{topic}», " + (f"удалёнка «{remote}»" if remote else "формат не указан (текстовый канал)"))
