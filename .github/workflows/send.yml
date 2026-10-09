@@ -1,9 +1,9 @@
 name: Вакансии в чат
 
 on:
-  schedule:
-    - cron: "2 13 * * *"  # ВРЕМЕННО: тест 09.10 в 13:02 UTC = 16:02 МСК; после теста вернуть "47 6 * * *"
-  workflow_dispatch:       # кнопка «Run workflow» для ручного запуска
+  # Расписания здесь нет: раз в день workflow запускает внешний сервис cron-job.org (см. README).
+  # Не добавляйте schedule, иначе в группу придёт два сообщения.
+  workflow_dispatch:       # запуск через API (cron-job.org) или кнопкой «Run workflow»
 
 permissions:
   contents: write          # чтобы закоммитить обновлённый sent.json

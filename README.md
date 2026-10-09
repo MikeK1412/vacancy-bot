@@ -51,8 +51,31 @@ python collector.py --days 30 --out выгрузка rueventjob textodromo
 
 ## Автозапуск
 
-GitHub Actions, файл `.github/workflows/send.yml`: каждый день в 10:00 по Москве (07:00 UTC)
-и вручную кнопкой Actions → «Вакансии в чат» → Run workflow. Задача выполняет `python main.py`
-и коммитит обновлённый `sent.json` обратно в репозиторий, чтобы не повторяться.
+GitHub Actions, файл `.github/workflows/send.yml`. Запускается только вручную (`workflow_dispatch`):
+кнопкой Actions → «Вакансии в чат» → Run workflow или запросом к API (см. ниже). Задача выполняет
+`python main.py` и коммитит обновлённый `sent.json` обратно в репозиторий, чтобы не повторяться.
 
 Секреты репозитория (Settings → Secrets and variables → Actions): `BOT_TOKEN`, `CHAT_ID`.
+
+## Запуск по расписанию
+
+Расписание GitHub (`on: schedule`) на бесплатных аккаунтах ненадёжно: в этом репозитории оно не срабатывало
+ни разу. Поэтому раз в день workflow запускает внешний сервис [cron-job.org](https://cron-job.org).
+Расписание в `send.yml` не добавляйте: два источника запуска дадут два сообщения в группе.
+
+Настройка задания в cron-job.org:
+
+- URL: `https://api.github.com/repos/<владелец>/<репо>/actions/workflows/send.yml/dispatches`
+- Метод: `POST`
+- Тело: `{"ref":"<ветка>"}` (основная ветка, например `main`)
+- Заголовки:
+  - `Authorization: Bearer <токен>`
+  - `Accept: application/vnd.github+json`
+  - `Content-Type: application/json`
+- Время: каждый день в 9:47 по Москве (часовой пояс задания Europe/Moscow).
+- Успешный ответ GitHub: `204 No Content`.
+
+Токен: fine-grained personal access token (GitHub → Settings → Developer settings → Fine-grained tokens),
+доступ только к этому репозиторию, права Repository permissions → Actions: Read and write.
+Срок действия до года; когда он истечёт, выпустите новый и замените его в задании cron-job.org.
+Токен не храните в репозитории и не пересылайте в открытом виде.
