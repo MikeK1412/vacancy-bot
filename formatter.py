@@ -9,7 +9,7 @@
 import re
 from html import escape
 
-from textutils import (TITLE_LIMIT, contacts_of, digest_number, employer_of, experience_years, no_experience, norm,
+from textutils import (_clean_title, TITLE_LIMIT, contacts_of, digest_number, employer_of, experience_years, no_experience, norm,
                        pay_of, summary_of, tidy_title, title_of, work_format)
 
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня",
@@ -32,16 +32,19 @@ def _qualifier(item, title):
     first = re.split(r"(?<=[.!?:])\s", body, 1)[0]
     # «Онлайн-школа по маркетингу ищет копирайтера» → «— онлайн-школа по маркетингу»
     m = re.match(r"([А-ЯЁA-Z«][^.!?:]{2,45}?)\s+(?:ищет|ищут|в поисках)\b", first)
-    if m and not re.match(r"(?:мы|я|ищем|ищу|компания|команда)\b", m.group(1), re.I):
+    if m and not re.match(r"(?:мы|я|ищем|ищу|компания|команда|в|во)\b", m.group(1), re.I):
         who = m.group(1)
         return " — " + (who[:1].lower() + who[1:] if who[1:2].islower() else who)  # «ООО» не трогаем
     # «…копирайтера в команду для проектов экспертов и продюсеров» → «для проектов экспертов и продюсеров»
-    for prep in ("для", "в", "во"):
+    for prep in ("для", "в", "во", "по"):
         for m in re.finditer(rf"\b{prep}\s+([^.,:;!?()]{{3,80}})", first):
             phrase = m.group(1).strip()
             if prep != "для":
                 phrase = re.split(r"\s+(?:для|и нужно|нужно|которы\w*|чтобы)\b", phrase)[0]
             low = phrase.lower()
+            cut_before_comma = first[m.end():m.end() + 1] == "," and re.search(r"(ых|их|ой|ый|ий|ая|ое|ые|ие)$", low)
+            if cut_before_comma:
+                continue
             if low in _GENERIC_PLACES or low.split()[0] in _TIME_WORDS or low[:1].isdigit():
                 continue
             if len(phrase) > _QUALIFIER_LIMIT:
@@ -58,11 +61,127 @@ _TIME_WORDS = {"день", "неделю", "месяц", "час", "сутки",
 _QUALIFIER_LIMIT = 60
 
 
-def _who(item):
+# Должности, из которых собираем заголовок взамен кривого. Порядок не важен: берём ту, что раньше встретилась в тексте.
+_ROLES = [
+    (r"smm[- ]?специалист\w*", "SMM-специалист"),
+    (r"специалист\w* по smm", "SMM-специалист"),
+    (r"smm[- ]?менеджер\w*", "SMM-менеджер"),
+    (r"контент[- ]?менеджер\w*", "Контент-менеджер"),
+    (r"контент[- ]?маркетолог\w*", "Контент-маркетолог"),
+    (r"(?:seo[- ])?копирайтер\w*", "Копирайтер"),
+    (r"сценарист\w*", "Сценарист"),
+    (r"редактор\w*", "Редактор"),
+    (r"корректор\w*", "Корректор"),
+    (r"автор\w* (?:текст|стат|пост)\w*", "Автор текстов"),
+    (r"журналист\w*", "Журналист"),
+    (r"райтер\w*", "Райтер"),
+]
+_PLACE_NOUNS = {"команду": "команда", "студию": "студия", "онлайн-школу": "онлайн-школа", "школу": "школа",
+                "компанию": "компания", "редакцию": "редакция", "агентство": "агентство", "проект": "проект",
+                "издательство": "издательство", "продакшн": "продакшн", "медиа": "медиа"}
+TITLE_MAX = 70
+
+
+def find_role(text):
+    """Название должности, которое раньше всех встречается в тексте, или пустая строка. Ничего не придумываем."""
+    low = norm(text)
+    found = [(m.start(), name) for pattern, name in _ROLES for m in [re.search(rf"\b{pattern}", low)] if m]
+    return min(found)[1] if found else ""
+
+
+def _context(item):
+    """Проект или компания из текста: «в команду Анфисы Чеховой» → «команда Анфисы Чеховой», «от продакшена X»."""
+    head = " ".join(l.strip() for l in item.text.split("\n")[:4])
+    m = re.search(r"\b[Вв] (" + "|".join(_PLACE_NOUNS) + r")\s+([«\"]?[A-ZА-ЯЁ][^,.:;!?()\n]{1,40}?)"
+                  r"(?=\s+(?:ищ|нуж|требу|на\b|для\b|—)|[,.:;!?(]|$)", head)
+    if m:
+        return f"{_PLACE_NOUNS[m.group(1)]} {m.group(2).strip()}"
+    m = re.search(r"\bот (?:продакшена|студии|агентства|компании)\s+(?:https?://)?([\w.-]+\.\w{2,}|[«\"][^»\"]{2,30}[»\"])", head, re.I)
+    if m:
+        return "продакшен " + m.group(1).rstrip("./")
+    employer = tidy_title(employer_of(item)).split(" — ")[0] if employer_of(item) else ""
+    return employer if len(employer) <= 40 else ""
+
+
+def _bad_title(title):
+    """Заголовок, который надо пересобрать из роли: «В солнечное воскресение…», «Ищут специалиста…», длинный, оборванный."""
+    if re.match(r"(в|во|на|от)\s", title, re.I):
+        return True
+    if re.match(r"(ищем|ищут|ищу|требуется|требуются|нужен|нужна|нужны|в поисках)\b", title, re.I):
+        return not find_role(title) or len(title) > TITLE_MAX
+    return len(title) > TITLE_MAX or title.endswith("…")
+
+
+def display_title(item):
+    """Заголовок для сообщения (на отбор и дубли не влияет: там используется title_of)."""
     title = tidy_title(title_of(item))
-    if "/" not in title and len(re.findall(r"[\w-]+", title)) <= 2:  # общий заголовок из одной должности
-        title += _qualifier(item, title)
-    employer = tidy_title(employer_of(item)) if employer_of(item) else ""
+    first = tidy_title(_clean_title(next((l for l in item.text.split("\n") if l.strip()), "")))
+    if item.part and first and len(first) <= 30 and re.search(r"[A-Za-zА-Яа-яЁё]{3,}", first):
+        title = first  # пункт подборки: первая строка («24. #SMM») — это и есть роль
+    if _bad_title(title) and find_role(title) and norm(title).startswith(norm(find_role(title))[:6]):
+        short = _shorten_title(title)
+        if short:
+            return short
+    if _bad_title(title):
+        role = find_role(title) or find_role(item.text)
+        if role:
+            context = _context(item) or _title_tail(title)
+            return f"{role} — {context}" if context else role
+        return title
+    if len(re.findall(r"[\w-]+", title)) <= 2 or ("/" in title and len(re.findall(r"[\w-]+", title)) <= 3):
+        context = _context(item)
+        if context and norm(context)[:12] not in norm(title):
+            title += f" — {context}"
+        else:
+            extra = _qualifier(item, title)
+            if len(extra) <= QUALIFIER_SHORT:
+                title += extra
+            elif "/" not in title:
+                # «Копирайтер для маркетплейса и истории коллекций на основе комментариев» → «…и истории коллекций»
+                title = _shorten_title(title + extra) or title
+    return title
+
+
+QUALIFIER_SHORT = 45
+
+
+def _shorten_title(title):
+    """«Копирайтер, тексты для Instagram, …, лендингов — RESTORADO» → «Копирайтер — RESTORADO»;
+    «Копирайтер для маркетплейса и истории коллекций на основе комментариев» → «… и истории коллекций».
+    Режем по запятым и предлогам, без многоточия. Пустая строка, если короче не выходит."""
+    title = title.rstrip("…").strip()
+    head, tail = (title.rsplit(" — ", 1) + [""])[:2] if " — " in title else (title, "")
+    tail = tail if 2 <= len(tail) <= 30 else ""
+    suffix = f" — {tail}" if tail else ""
+    while len(head) + len(suffix) > TITLE_MAX:
+        if "," in head:
+            head = head.rsplit(",", 1)[0]
+            continue
+        m = re.search(r"^(.{8,}?)\s+(?:на|в|во|для|и|с|по)\s+[^ ]+(?:\s+[^ ]+)*$", head)
+        cuts = [mm.start() for mm in re.finditer(r"\s(?:на|в|во|для|и|с|по)\s", head) if mm.start() >= 8]
+        if not cuts:
+            return ""
+        head = head[: cuts[-1]]
+    return head.strip(" ,—-") + suffix
+
+
+def _title_tail(title):
+    """Компания из самого заголовка: «… — RESTORADO», «… в Продюсерский центр Эда»."""
+    title = title.rstrip("…").strip()
+    if " — " in title:
+        tail = title.rsplit(" — ", 1)[1].strip()
+        if 2 <= len(tail) <= 30:
+            return tail
+    m = re.search(r"\s(?:в|во)\s+([«\"]?[A-ZА-ЯЁ][^,.:;!?]{2,})$", title)
+    if m:
+        tail = m.group(1)
+        return tail if len(tail) <= 35 else tail[:35].rsplit(" ", 1)[0]
+    return ""
+
+
+def _who(item):
+    title = display_title(item)
+    employer = tidy_title(employer_of(item)).split(" — ")[0] if employer_of(item) else ""
     if employer and norm(employer)[:15] not in norm(title) and len(title) + len(employer) + 3 <= TITLE_LIMIT + 20:
         return f"{title} — {employer}"
     return title

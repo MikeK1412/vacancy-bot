@@ -70,7 +70,7 @@ _LEADING_JUNK = re.compile(r"^[^\wА-Яа-яЁё(]+")
 _SEEK = re.compile(r"[^.!?\n]*\b(?:ищ(?:ем|ут|у)|требуется|требуются|в поисках|нужен|нужна)\b[^.!?\n]*", re.I)
 _FIELD = re.compile(r"^\s*(работодатель|где|компания|заказчик)\s*:\s*(.+)$", re.I)
 _TASKS_HEADER = re.compile(
-    r"^\W*(задачи|обязанности|что (?:нужно|предстоит|будет нужно) делать|что делать|чем (?:предстоит|нужно|вы будете) заниматься"
+    r"^\W*(какие задачи[^:\n]{0,30}|задачи|обязанности|что (?:нужно|предстоит|будет нужно) делать|что делать|чем (?:предстоит|нужно|вы будете) заниматься"
     r"|вам предстоит|что предстоит|функционал|что нужно)\b", re.I)
 _SKIP_LINE = re.compile(r"^\s*(з/п|зп|зарплата|оплата|доход|формат|график|опыт|работодатель|где|компания|о вакансии)\s*:", re.I)
 _BULLET = re.compile(r"^\s*(?:[-–—•·*▪️✏️🔹🔸✅➖]|\d+[.)])\s*")
@@ -178,6 +178,23 @@ def _section_points(lines, start, header_re, limit):
     return [strip_contacts(p) for p in points if p]
 
 
+# Приветствие автора: «Доброе утро, дорогие.», «Привет👋🏽», «Всем привет!» — только сами слова приветствия
+_GREETING = re.compile(
+    r"(?:^|(?<=[.!?…]\s))(?:доброе утро|добрый (?:день|вечер)|всем привет|привет(?:ствую)?|здравствуйте)"
+    r"(?:,?\s*(?:дорогие|друзья|коллеги|все|ребята))?[^\w«(]*", re.I)
+# Служебные рубрики в начале сути: «Какие задачи предстоит выполнять:», «Условия и требования:», «Описание вакансии:»…
+_RUBRIC = re.compile(
+    r"^\W*(?:какие задачи[^:\n]{0,30}|условия и требования|требования и условия|обязанности|требования|задачи|условия"
+    r"|что (?:нужно|предстоит|будет нужно) делать|чем (?:предстоит|нужно|вы будете) заниматься|описание вакансии"
+    r"|о вакансии|о проекте|о компании|вам предстоит|что предстоит|функционал|что мы предлагаем|мы предлагаем)\s*[:—–-]\s*", re.I)
+
+
+def strip_rubric(text):
+    """Убирает служебную рубрику в начале («Условия и требования: Удалённо…» → «Удалённо…»)."""
+    stripped = _RUBRIC.sub("", text, count=1)
+    return stripped[:1].upper() + stripped[1:] if stripped != text else text
+
+
 def summary_of(item, limit=SUMMARY_LIMIT):
     """Суть в 2–3 строки: задачи и главное требование, иначе первые фразы описания. Перечисления через запятую."""
     lines = [l.strip() for l in item.text.split("\n")]
@@ -188,25 +205,29 @@ def summary_of(item, limit=SUMMARY_LIMIT):
         elif not req and _REQ_HEADER.match(line):
             req = _section_points(lines, i, _REQ_HEADER, 1)
     if tasks:
-        text = _sentence(", ".join(_lower_first(p) for p in tasks))
+        text = _sentence(", ".join(_lower_first(strip_rubric(p)) for p in tasks))
         if req:
             text += " " + _sentence(req[0])
         return _shorten(text, limit)
     body, cut_early = [], False
-    for line in lines[1:]:
+    # первая содержательная строка — это заголовок (служебные «[Свежий сценарий]» перед ней не считаем)
+    head = next((n for n, l in enumerate(lines) if l and not _META_LINE.match(l)), 0)
+    for line in lines[head + 1:]:
         if not line or _SKIP_LINE.match(line) or _CONTACT_LINE.match(line) or _META_LINE.match(line):
             continue
         if line.startswith("#") and " " not in line.strip("#"):
             continue
-        line = re.sub(r"^\W*(требования|задачи|обязанности|условия)\s*:\s*", "", line, flags=re.I)
+        line = _RUBRIC.sub("", line, count=1)
+        if not line.strip():
+            continue
         body.append(_BULLET.sub("", line))
         if sum(len(b) for b in body) > limit:
             cut_early = True  # дальше в посте ещё есть текст
             break
     text = strip_contacts(" ".join(body).replace("#", "")).replace("[", "").replace("]", "")
     # приветствия авторов («Доброе утро, дорогие.») в суть не берём
-    text = re.sub(r"(?:^|(?<=[.!?]\s))(?:доброе|добрый|привет|всем привет|друзья|коллеги)[^.!?]*[.!?]\s*", "", text, flags=re.I)
-    text = _shorten(text, limit)
+    text = _GREETING.sub("", text)
+    text = _shorten(strip_rubric(text), limit)
     if cut_early and not text.endswith("…"):
         text = text.rstrip(" .,;:—–-") + "…"  # описание обрезано: многоточие, даже если вырезанная ссылка его укоротила
     return text
