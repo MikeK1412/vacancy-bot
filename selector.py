@@ -91,8 +91,38 @@ def instagram_problem(item, kw):
     return ""
 
 
+def bot_only_contact(item, kw):
+    """Единственный способ отклика — бот (ник или ссылка на …bot), и это не известный бот канала с контактами."""
+    contacts = [c for c in contacts_of(item) if c[1] != "instagram"]
+    if not contacts or contact_button(item):
+        return False
+    known = kw.get("боты для отклика", [])
+
+    def is_bot(key):
+        name = key.split("?")[0].rstrip("/").split("/")[-1].lstrip("@")
+        return name.endswith("bot") and name not in known
+
+    return all(is_bot(key) for key, _, _ in contacts)
+
+
+def is_ad(item, kw):
+    """Реклама курса или бота: по совокупности рекламных признаков и при отсутствии работодателя и условий найма."""
+    text = norm(item.text)
+    hits = {p for p in kw.get("реклама курсов", []) if p in text}
+    raw_title = title_of(item)
+    letters = [c for c in raw_title if c.isalpha()]
+    shout = "!" in raw_title and letters and sum(c.isupper() for c in letters) / len(letters) > 0.7
+    score = len(hits) + (1 if shout else 0)
+    s = hiring_signals(item)
+    return score >= 2 and not s["работодатель"] and not s["условия"]
+
+
 def is_not_vacancy(item, kw):
-    """Причина, если пост не вакансия (статья, совет, подборка), иначе пустая строка."""
+    """Причина, если пост не вакансия (статья, совет, подборка, реклама курса или бота), иначе пустая строка."""
+    if bot_only_contact(item, kw):
+        return "отклик только через бота"
+    if is_ad(item, kw):
+        return "реклама курса или бота"
     s = hiring_signals(item)
     title = norm(title_of(item))
     if not s["контакт"] and not s["условия"]:
