@@ -9,7 +9,8 @@ import re
 from dataclasses import dataclass
 
 import config
-from textutils import contact_button, contacts_of, experience_years, find_any, latin_share, load_keywords, norm, title_of
+from textutils import (_words_regex, city_only, contact_button, contacts_of, experience_years, find_any, latin_share,
+                       load_keywords, norm, title_of)
 
 
 @dataclass
@@ -146,6 +147,69 @@ def editor_only(item, kw):
     return not find_any(norm(item.text), kw.get("копирайтинг в тексте", []))
 
 
+# --- очная работа, жёсткий график, старшие позиции ----------------------------
+
+# «10:00–19:00», «с 09:00 до 18:00», «5/2 с 10:00» — время с минутами
+_CLOCK = re.compile(r"(?<!\d)\d{1,2}:\d{2}\s*(?:-|–|—|до)\s*\d{1,2}:\d{2}"
+                    r"|(?<!\w)с\s*\d{1,2}:\d{2}\s*(?:-|–|—|до)\s*\d{1,2}(?::\d{2})?(?!\d)"
+                    r"|5\s*/\s*2[^\n.;]{0,20}?(?<!\w)с\s*\d{1,2}:\d{2}")
+# «с 9 до 18» — без минут, только правдоподобные часы и не «с 1 до 3 месяцев»
+_BARE_HOURS = re.compile(r"(?<!\w)с\s*(\d{1,2})\s*(?:до|-|–|—)\s*(\d{1,2})(?![\d.,:])"
+                         r"(?!\s*(?:тыс|к\b|k\b|%|₽|\$|руб|р\b|мес|лет|год|дн|знак|шт|слов|чел|раз|мин|сек|постов|статей|текст))")
+# так пишут про удалёнку: «на связи с 10 до 19 по МСК»
+_ONLINE_HOURS = re.compile(r"на связи|онлайн|в сети|мск|по москв|часов\w* пояс")
+
+
+def hard_schedule(text):
+    """Жёсткий рабочий график («с 9 до 18», «5/2 с 10:00») — признак офиса, если формат не указан."""
+    for line in re.split(r"[\n;]", norm(text)):
+        if _ONLINE_HOURS.search(line):
+            continue
+        m = _CLOCK.search(line)
+        if m:
+            return m.group(0).strip()
+        for m in _BARE_HOURS.finditer(line):
+            if 6 <= int(m.group(1)) <= 12 and 15 <= int(m.group(2)) <= 22:
+                return m.group(0).strip()
+    return ""
+
+
+_NEGATED = re.compile(r"(?<!\w)(?:без|не|нет|никаких|ни)\s+(?:\w+\s+){0,2}$")
+_NEGATED_AFTER = re.compile(r"^\w*(?:\s+\w+){0,2}\s+не\s+(?:потребуется|нужно|нужен|нужна|нужны|требуется|обязательн|придется|надо)")
+_CHOICE = re.compile(r"(?<!\w)или(?!\w)|на выбор|по желанию|по возможности|при желании|можно")
+
+
+def onsite(text, kw):
+    """Фраза очной работы из [очная работа] или пустая строка.
+
+    Не считаются: отрицание («без выездов», «не нужно ездить в офис», «присутствовать на них не потребуется») и выбор вместе с удалёнкой
+    в той же строке («Удалёнка или офис в Москве: работайте, где удобно»).
+    """
+    for line in re.split(r"[\n;]", text):
+        for p in kw.get("очная работа", []):
+            for m in _words_regex(p).finditer(line):
+                if _NEGATED.search(line[max(0, m.start() - 40):m.start()]) or _NEGATED_AFTER.search(line[m.end():]):
+                    continue
+                if _CHOICE.search(line) and find_any(line, kw.get("удалёнка", [])):
+                    continue
+                return p
+    return ""
+
+
+# «ассистент руководителя», «помощник главного редактора», «для руководителя» — не старшая позиция
+_NOT_SENIOR = re.compile(r"(?<!\w)(?:ассистент\w*|помощни\w*|для|при|у|от|с)\s+$")
+
+
+def senior_title(item, kw):
+    """Слово старшей позиции в заголовке («старший», «главный редактор», «head»), иначе пустая строка."""
+    title = norm(title_of(item))
+    for p in kw.get("сеньорская позиция", []):
+        m = _words_regex(p).search(title)
+        if m and not _NOT_SENIOR.search(title[max(0, m.start() - 25):m.start()]):
+            return p
+    return ""
+
+
 def check_keywords(item):
     kw = keywords()
     text = norm(item.text)
@@ -177,6 +241,9 @@ def check_keywords(item):
         return Verdict(False, "не тема: нет слов про тексты")
     if editor_only(item, kw):
         return Verdict(False, "редактор, не копирайтер")
+    senior = senior_title(item, kw)
+    if senior:
+        return Verdict(False, f"старшая позиция: {senior}")
     if is_smm(item):
         shooting = find_any(text, kw.get("smm: съёмки и выезды", []))
         if shooting:
@@ -184,11 +251,20 @@ def check_keywords(item):
     hard_office = find_any(full, kw.get("не удалёнка", []))
     if hard_office:
         return Verdict(False, f"не удалёнка: {hard_office}")
+    in_person = onsite(full, kw)
+    if in_person:
+        return Verdict(False, f"очно: {in_person}")
     remote = find_any(full, kw.get("удалёнка", []))
+    city = city_only(item)
+    if city and not remote:
+        return Verdict(False, f"очно: жить в городе ({city})")
     if not remote:
         office = find_any(full, kw.get("офис", []))
         if office:
             return Verdict(False, f"офис: {office}")
+        schedule = hard_schedule(full)
+        if schedule:
+            return Verdict(False, f"офис по графику: {schedule}")
         if item.channel not in config.TEXT_CHANNELS:
             return Verdict(False, "удалёнка не указана")
     years = experience_years(item)

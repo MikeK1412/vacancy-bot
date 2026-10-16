@@ -9,8 +9,8 @@
 import re
 from html import escape
 
-from textutils import (_clean_title, TITLE_LIMIT, contacts_of, digest_number, employer_of, experience_years, no_experience, norm,
-                       pay_of, summary_of, tidy_title, title_of, work_format)
+from textutils import (_META_LINE, _SEEK, _clean_title, TITLE_LIMIT, city_only, contacts_of, digest_number, employer_of,
+                       experience_years, no_experience, norm, pay_of, strip_contacts, strip_greeting, summary_of, tidy_title, title_of, work_format)
 
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня",
           "июля", "августа", "сентября", "октября", "ноября", "декабря"]
@@ -112,10 +112,30 @@ def _bad_title(title):
     return len(title) > TITLE_MAX or title.endswith("…")
 
 
+def _without_greeting(title, item):
+    """Заголовок без приветствия. Если приветствие и было всем заголовком («Доброго солнечного утра, дорогие»),
+    берём фразу с «ищем/требуется», иначе следующую содержательную строку, тоже без приветствия."""
+    stripped = strip_greeting(title).strip()
+    if stripped == title.strip():
+        return title
+    if re.search(r"[A-Za-zА-Яа-яЁё]{3,}", stripped):
+        return stripped[:1].upper() + stripped[1:]
+    m = _SEEK.search(strip_contacts(item.text))  # без ссылок: точка в «hh.ru» обрывает фразу
+    if m:
+        return _clean_title(m.group(0).strip("[] "))
+    for line in item.text.split("\n"):
+        if _META_LINE.match(line):
+            continue
+        line =_clean_title(strip_greeting(line.strip("[] ")))
+        if re.search(r"[A-Za-zА-Яа-яЁё]{3,}", line) and norm(line) not in norm(title):
+            return line
+    return title
+
+
 def display_title(item):
     """Заголовок для сообщения (на отбор и дубли не влияет: там используется title_of)."""
-    title = tidy_title(title_of(item))
-    first = tidy_title(_clean_title(next((l for l in item.text.split("\n") if l.strip()), "")))
+    title = tidy_title(_without_greeting(title_of(item), item))
+    first =tidy_title(_clean_title(next((l for l in item.text.split("\n") if l.strip()), "")))
     if item.part and first and len(first) <= 30 and re.search(r"[A-Za-zА-Яа-яЁё]{3,}", first):
         title = first  # пункт подборки: первая строка («24. #SMM») — это и есть роль
     if _bad_title(title) and find_role(title) and norm(title).startswith(norm(find_role(title))[:6]):
@@ -193,6 +213,9 @@ def _labels(item, remote_words):
     if pay:
         labels.append(f"💰 {_abbr(pay)}")
     labels += work_format(item, remote_words)
+    city = city_only(item)
+    if city:
+        labels.append(f"📍 только {city}")
     if no_experience(item):
         labels.append("без опыта")
     else:
