@@ -227,6 +227,8 @@ def _labels(item, remote_words):
             labels.append("опыт от года")
         elif years:
             labels.append(f"опыт от {years:g} лет".replace(".", ","))
+    if labels == ["проект"]:
+        return ""  # одинокая метка «проект» ничего не говорит
     return " · ".join(labels)
 
 

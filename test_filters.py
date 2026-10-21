@@ -190,9 +190,14 @@ class Formatting(unittest.TestCase):
         self.assertEqual(labels[0], f"💰 2{NBSP}000{NBSP}₽ за проект")
         self.assertIn("удалёнка", labels)
 
-    def test_project_label_kept_without_pay(self):
+    def test_project_label_kept_with_other_labels(self):
         item = make("Сценарист\nУдалённо, проектная работа. @a_hr")
         self.assertEqual(_labels(item, REMOTE), "удалёнка · проект")
+
+    def test_lone_project_label_hidden(self):
+        item = make("Сценарист\nПроектная работа. @a_hr")
+        self.assertEqual(_labels(item, REMOTE), "")
+        self.assertNotIn("проект", format_vacancy(1, item, REMOTE).split("\n")[-2])
 
     def test_labels_in_one_line(self):
         item = make("Сценарист\nУдалённо, частичная занятость, проектная работа, 2 000 ₽ в месяц. @a_hr")
