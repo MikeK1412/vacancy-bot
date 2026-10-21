@@ -9,7 +9,7 @@
 import re
 from html import escape
 
-from textutils import (_META_LINE, _SEEK, _clean_title, TITLE_LIMIT, city_only, contacts_of, digest_number, employer_of,
+from textutils import (_META_LINE, _SEEK, _clean_title, TITLE_LIMIT, city_only, contacts_of, employer_of,
                        experience_years, no_experience, norm, pay_of, strip_contacts, strip_greeting, summary_of, tidy_title, title_of, work_format)
 
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня",
@@ -212,7 +212,10 @@ def _labels(item, remote_words):
     pay = pay_of(item)
     if pay:
         labels.append(f"💰 {_abbr(pay)}")
-    labels += work_format(item, remote_words)
+    formats = work_format(item, remote_words)
+    if pay and "за " in pay:
+        formats = [f for f in formats if f != "проект"]  # «2 000 ₽ за проект» уже говорит про разовую оплату
+    labels += formats
     city = city_only(item)
     if city:
         labels.append(f"📍 только {city}")
@@ -260,10 +263,10 @@ def _link_label(key):
 def _contact_line(item):
     contact = _contact_html(item)
     if item.part and contact:
-        return f"✉️ {contact} · из подборки, пункт {digest_number(item)}"
+        return f"✉️ {contact}"
     if contact:
         return f"✉️ Откликнуться: {contact}"
-    return "✉️ Контакт по кнопке под постом"
+    return "✉️ Контакт — в оригинальном посте (ссылка в заголовке)"
 
 
 def format_vacancy(n, item, remote_words):

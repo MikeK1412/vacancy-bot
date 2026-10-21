@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import config
 from textutils import (_words_regex, city_only, contact_button, contacts_of, experience_years, find_any, latin_share,
-                       load_keywords, norm, title_of)
+                       greeting_title, load_keywords, norm, title_of)
 
 
 @dataclass
@@ -118,6 +118,49 @@ def is_ad(item, kw):
     return score >= 2 and not s["работодатель"] and not s["условия"]
 
 
+def is_service_ad(item, kw):
+    """Реклама сервиса («AI-копирайтер на базе Claude, бот в Telegram, без VPN»): минимум два рекламных признака
+    (названия моделей считаются за один) и нет условий найма и перечня задач. Работодателя не требуем:
+    «НейроПеро ищет свежие данные» совпадает с «ищет», но вакансией не является."""
+    text = norm(item.text)
+    hits = {p for p in kw.get("реклама сервисов", []) if p in text}
+    if find_any(text, kw.get("реклама сервисов: модели", [])):
+        hits.add("модель")
+    s = hiring_signals(item)
+    return len(hits) >= 2 and not s["условия"] and not s["задачи"]
+
+
+def adult_content(item, kw):
+    """Фраза из [18+], если контент для взрослых. Требование к возрасту кандидата («возраст 18+», «• 18+») не считается."""
+    skip = kw.get("18+: не считать строку", [])
+    for line in norm(item.text).split("\n"):
+        if find_any(line, skip) or len(line.strip(" •✓✔-–—*·	")) <= 8:
+            continue  # «возраст 18+», «✓ Гражданство РФ, 18+», пункт списка «• 18+»
+        # «18+, грамотная речь»: «18+» в начале строки перед запятой — перечень требований
+        line = re.sub(r"^[\W]*18\+\s*[,;]", "", line)
+        hit = find_any(line, kw.get("18+", []))
+        if hit:
+            return hit
+    return ""
+
+
+def not_about_texts(item, kw):
+    """Слово из [не про тексты: заголовок] (SMM, CRM), если в заголовке нет ни одного слова из [тексты в заголовке]."""
+    title = norm(title_of(item))
+    hit = find_any(title, kw.get("не про тексты: заголовок", []))
+    if hit and not find_any(title, kw.get("тексты в заголовке", [])):
+        return hit
+    return ""
+
+
+def greeting_without_role(item, kw):
+    """Первая строка — одно приветствие, а в заголовке (после замены на фразу «ищем…») нет ни одной профессии."""
+    if not greeting_title(item):
+        return False
+    roles = kw.get("тема в заголовке", []) + kw.get("текстовые роли", []) + kw.get("smm и контент", [])
+    return not find_any(norm(title_of(item)), roles)
+
+
 def is_not_vacancy(item, kw):
     """Причина, если пост не вакансия (статья, совет, подборка, реклама курса или бота), иначе пустая строка."""
     if bot_only_contact(item, kw):
@@ -222,6 +265,13 @@ def check_keywords(item):
     ad = find_any(text, kw.get("реклама каналов", []))
     if ad:
         return Verdict(False, f"реклама канала: {ad}")
+    if is_service_ad(item, kw):
+        return Verdict(False, "реклама сервиса")
+    adult = adult_content(item, kw)
+    if adult:
+        return Verdict(False, f"18+: {adult}")
+    if greeting_without_role(item, kw):
+        return Verdict(False, "приветствие вместо вакансии")
     instagram = instagram_problem(item, kw)
     if instagram:
         return Verdict(False, f"инстаграм: {instagram}")
@@ -236,6 +286,9 @@ def check_keywords(item):
     off_topic = find_any(title, kw.get("не тема", []))
     if off_topic:
         return Verdict(False, f"не тема: {off_topic}")
+    not_texts = not_about_texts(item, kw)
+    if not_texts:
+        return Verdict(False, f"не про тексты: «{not_texts}» в заголовке")
     topic = find_any(title, kw.get("тема в заголовке", [])) or find_any(text, kw.get("тема в тексте", []))
     if not topic:
         return Verdict(False, "не тема: нет слов про тексты")

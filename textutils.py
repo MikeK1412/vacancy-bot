@@ -174,12 +174,22 @@ def title_of(item):
         return ""
     first = _clean_title(lines[0].strip("[] "))
     seek = None
-    if len(first) > 120 or not re.search(r"[А-Яа-яA-Za-z]{4,}", first) or re.match(r"(доброе|добрый|привет|друзья|коллеги)", norm(first)):
+    if len(first) > 120 or not re.search(r"[А-Яа-яA-Za-z]{4,}", first) or re.match(r"(добр(?:ое|ого|ой|ый|ым)\s|привет|друзья|коллеги)", norm(first)):
         m = _SEEK.search(item.text)
         if m:
             seek = _clean_title(m.group(0).strip("[] "))
     title = seek or first
     return title[:120].rsplit(" ", 1)[0] + "…" if len(title) > 120 else title
+
+
+def greeting_title(item):
+    """True, если первая содержательная строка поста — одно приветствие («Доброго октябрьского воскресенья, дорогие»)."""
+    lines = [l for l in item.text.split("\n") if l.strip() and not _META_LINE.match(l)]
+    if not lines:
+        return False
+    first = _clean_title(lines[0].strip("[] "))
+    rest = strip_greeting(first)
+    return rest != first and not re.search(r"[A-Za-zА-Яа-яЁё]{3,}", rest)
 
 
 def employer_of(item):
@@ -222,7 +232,7 @@ def _section_points(lines, start, header_re, limit):
 
 # Приветствие автора: «Доброе утро, дорогие.», «Привет👋🏽», «Всем привет!» — только сами слова приветствия
 _GREETING = re.compile(
-    r"(?:^|(?<=[.!?…]\s))(?:(?:доброе|доброго|добрый|доброй)\s+(?:\w+\s+)?(?:утро|утра|день|дня|вечер|вечера|ночи|времени суток)"
+    r"(?:^|(?<=[.!?…]\s))(?:(?:доброе|доброго|добрый|доброй)\s+(?:\w+\s+){0,2}(?:утро|утра|день|дня|вечер|вечера|ночи|времени суток|воскресень\w+|понедельник\w*|вторник\w*|сред[ыу]|четверг\w*|пятниц\w+|суббот\w+)"
     r"|всем привет|привет(?:ствую)?(?:\s+всем)?|здравствуйте"
     r"|(?:дорогие\s+)?(?:друзья|коллеги|ребята|подписчики)(?=\s*[,!.]))"
     r"(?:,?\s*(?:дорогие|друзья|коллеги|все|всем|ребята))?[^\w«(]*", re.I)
@@ -408,10 +418,22 @@ def format_pay(chunk, tail=""):
     return f"{amount}{NBSP}{cur}{period}"
 
 
+_AUDIENCE = re.compile(r"просмотр|подписчик|охват|лайк|реакци")
+AUDIENCE_WINDOW = 20
+
+
+def _audience_number(line, m):
+    """Число рядом (в пределах AUDIENCE_WINDOW знаков) со словами про просмотры, подписчиков, охват: это бонус
+    за показатели, а не оплата. Окно обрывается на запятой или «;», чтобы соседний пункт не мешал."""
+    before = re.split(r"[,;]", line[max(0, m.start() - AUDIENCE_WINDOW): m.start()])[-1]
+    after = re.split(r"[,;]", line[m.end(): m.end() + AUDIENCE_WINDOW])[0]
+    return bool(_AUDIENCE.search(norm(before + " " + after)))
+
+
 def pay_of(item):
     """Оплата в едином виде («от 50 000 ₽/мес»), если в тексте есть сумма с валютой, иначе пустая строка."""
     for line in item.text.split("\n"):
-        m = _MONEY.search(line)
+        m = next((x for x in _MONEY.finditer(line) if not _audience_number(line, x)), None)
         if m and re.search(r"\d", m.group(0)):
             # «от 100 000 до 120 000 ₽»: сумма-регулярка ловит только «до 120 000 ₽», добираем начало диапазона
             before = line[max(0, m.start() - 30): m.start()]
