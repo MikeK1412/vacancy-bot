@@ -9,8 +9,12 @@ class TelegramError(RuntimeError):
 
 
 def call(token, method, **params):
-    r = requests.post(API.format(token=token, method=method), json=params, timeout=30)
-    data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    try:
+        r = requests.post(API.format(token=token, method=method), json=params, timeout=30)
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    except (requests.RequestException, ValueError) as e:
+        # В тексте исключений requests есть URL с токеном, поэтому показываем только тип ошибки.
+        raise TelegramError(f"{method}: {type(e).__name__}") from None
     if not data.get("ok"):
         raise TelegramError(f"{method}: {data.get('description') or r.status_code}")
     return data["result"]

@@ -2,7 +2,8 @@
 
     python main.py --dry-run          печать сообщения в консоль, sent.json не меняется
     python main.py --dry-run --debug  плюс список прошедших, отсеянных и дублей
-    python main.py                    отправка в группу (нужны BOT_TOKEN и CHAT_ID в .env)
+    python main.py                    отправка в группу (нужны BOT_TOKEN и CHAT_ID в .env;
+                                      CHAT_ID — один id или несколько через запятую)
 """
 import argparse
 import sys
@@ -44,6 +45,22 @@ def choose(items):
     return chosen
 
 
+def deliver(token, chat_ids, message, send=send_message):
+    """Шлёт сообщение в каждый чат. Ошибка одного чата не мешает остальным.
+    Возвращает (ушло в чаты, не ушло в чаты); в лог попадает только id чата и описание ошибки."""
+    sent, failed = [], []
+    for chat_id in chat_ids:
+        try:
+            send(token, chat_id, message)
+        except TelegramError as e:
+            failed.append(chat_id)
+            print(f"Чат {chat_id}: не отправлено, {e}")
+        else:
+            sent.append(chat_id)
+            print(f"Чат {chat_id}: отправлено")
+    return sent, failed
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
@@ -51,9 +68,12 @@ def main():
     ap.add_argument("--debug", action="store_true", help="показать, что прошло отбор и что отсеяно")
     args = ap.parse_args()
 
-    token, chat_id = config.telegram_settings()
-    if not args.dry_run and not (token and chat_id):
-        sys.exit("Нет BOT_TOKEN или CHAT_ID. Заполните .env (образец: .env.example) или запустите с --dry-run.")
+    token, raw_chat_ids = config.telegram_settings()
+    chat_ids, bad_ids = config.parse_chat_ids(raw_chat_ids)
+    for bad in bad_ids:
+        print(f"::warning::CHAT_ID: значение {bad!r} не похоже на id чата, пропущено")
+    if not args.dry_run and not (token and chat_ids):
+        sys.exit("Нет BOT_TOKEN или корректного CHAT_ID. Заполните .env (образец: .env.example) или запустите с --dry-run.")
 
     tails = selector.keywords().get("хвосты", [])
     print(f"Сбор постов за {config.DAYS_BACK} дн. из {len(config.CHANNELS)} каналов…")
@@ -117,18 +137,23 @@ def main():
     if args.dry_run:
         print(f"\n=== Сообщение ({len(chosen)} вак., {len(message)} знаков) ===\n")
         print(message)
+        print(f"\nПолучатели ({len(chat_ids)}): " + (", ".join(chat_ids) or "CHAT_ID не задан"))
+        for chat_id in chat_ids:
+            print(f"  → чат {chat_id}: это же сообщение")
         print("\n(--dry-run: ничего не отправлено, sent.json не изменён)")
         return
 
-    print(f"\n=== Отправляется ({len(chosen)} вак.) ===\n{message}")
-    try:
-        send_message(token, chat_id, message)
-    except TelegramError as e:
-        sys.exit(f"Telegram не принял сообщение: {e}")
+    print(f"\n=== Отправляется ({len(chosen)} вак., чатов: {len(chat_ids)}) ===\n{message}\n")
+    sent_to, failed_to = deliver(token, chat_ids, message)
+    if not sent_to:
+        sys.exit("Сообщение не ушло ни в один чат, sent.json не изменён.")
+    if failed_to:
+        print(f"::warning::Не доставлено в {len(failed_to)} из {len(chat_ids)} чатов: " + ", ".join(failed_to))
+    # Вакансия отправлена, если ушла хотя бы в один чат: запись одна на вакансию, не на чат.
     for item in chosen:
         store.add(item)
     store.save()
-    print(f"\nОтправлено {len(chosen)} вакансий, sent.json обновлён.")
+    print(f"\nОтправлено {len(chosen)} вакансий в {len(sent_to)} из {len(chat_ids)} чатов, sent.json обновлён.")
 
 
 if __name__ == "__main__":

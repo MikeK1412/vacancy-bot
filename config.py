@@ -1,5 +1,6 @@
 """Настройки парсера. Токены здесь не храним, они берутся из .env или переменных окружения."""
 import os
+import re
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -58,7 +59,26 @@ def load_env(path=ENV_FILE):
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+CHAT_ID_RE = re.compile(r"^(-?\d+|@\w{4,})$")
+
+
+def parse_chat_ids(raw):
+    """CHAT_ID: один или несколько id через запятую (пробелы вокруг и пустые элементы не мешают).
+    Возвращает (список уникальных id по порядку, список отброшенных значений)."""
+    ids, bad = [], []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not CHAT_ID_RE.match(part):
+            bad.append(part)
+        elif part not in ids:
+            ids.append(part)
+    return ids, bad
+
+
 def telegram_settings():
+    """Токен и сырое значение CHAT_ID (разбирает parse_chat_ids)."""
     load_env()
     token = os.environ.get("BOT_TOKEN", "").strip()
     chat_id = os.environ.get("CHAT_ID", "").strip()
